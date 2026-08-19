@@ -1,0 +1,40 @@
+# 자격증명 / 접속정보 (절대 커밋 금지)
+.env
+*.env
+!*.env.example
+우분투서버_SSH접속정보.txt
+*_SSH접속정보.txt
+*.pem
+*.key
+secrets/
+
+# 브릿지 런타임
+volumes/
+data/
+logs/
+*.log
+
+# 빌드 산출물
+/bin/
+/dist/
+node_modules/
+*.exe
+
+# 에디터 / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+uv.lock
+
+# 자격증명 파일 변형 (.env.slack 등)
+.env.*
+!.env.example

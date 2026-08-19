@@ -1,0 +1,158 @@
+# Channel Bridge - 개발/테스트용 Mattermost 2대 + 브릿지 DB
+# Team Edition 고정 (Entry/Enterprise 기능에 의존하지 않도록)
+#
+# MM 2대(A/B)는 설정을 anchor로 공유해 드리프트를 방지한다.
+# 데이터는 named volume이므로 `docker compose down -v` 로 완전 초기화된다.
+#
+# [A/B의 호스트 이름을 나누는 이유]
+# 쿠키는 포트를 스코프에 포함하지 않는다(RFC 6265 §8.5). 두 서버를 같은
+# 호스트의 다른 포트로 열면 MMAUTHTOKEN 이 서로를 덮어써서, 한쪽에 로그인하는
+# 순간 다른 쪽이 "Your session has expired" 로 튕긴다. 서버 세션은 멀쩡한데
+# 브라우저가 남의 토큰을 보내서 생기는 현상이라 포트로는 해결되지 않는다.
+# 그래서 nip.io(이름에 담긴 IP를 그대로 돌려주는 공개 DNS)로 호스트를 가른다.
+#
+# [SiteURL 은 브라우저가 실제로 여는 주소여야 한다]
+# MM 은 WebSocket 업그레이드의 Origin 헤더를 SiteURL 과 대조하고, 다르면
+# 403 으로 거절한다. 그런데 REST 는 그대로 통과하므로 화면은 멀쩡히 뜨고
+# **실시간 갱신만 조용히 죽는다.** (새 글이 채널을 옮겼다 와야 보인다.)
+# 리버스 프록시 뒤에 둔다면 MM_A_SITEURL/MM_B_SITEURL 에 프록시의 공개
+# 주소를 넣어야 한다. 컨테이너 포트나 내부 IP 를 넣으면 안 된다.
+name: chbridge-dev
+
+x-mm-env: &mm-env
+  TZ: ${TZ:-Asia/Seoul}
+  MM_SQLSETTINGS_DRIVERNAME: postgres
+
+  # --- 브릿지 동작에 필요한 설정 (PRD 4.5 선행 요구사항) ---
+  MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE: "true"
+  MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE: "true"
+  MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+  MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+  MM_SERVICESETTINGS_ENABLEINCOMINGWEBHOOKS: "true"
+  MM_SERVICESETTINGS_ENABLEOUTGOINGWEBHOOKS: "true"
+  MM_PLUGINSETTINGS_ENABLE: "true"
+
+  # --- 테스트 자동화 편의 ---
+  # LocalMode: 인증 없이 `mmctl --local` 사용 가능 -> 픽스처 스크립트화
+  MM_SERVICESETTINGS_ENABLELOCALMODE: "true"
+  MM_SERVICESETTINGS_LOCALMODESOCKETLOCATION: /var/tmp/mattermost_local.socket
+  MM_TEAMSETTINGS_ENABLEOPENSERVER: "true"
+  MM_EMAILSETTINGS_REQUIREEMAILVERIFICATION: "false"
+  MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS: "false"
+
+  # --- PRD 5.8 파일 크기 한계 (Slack 1GB 대비 제약 재현) ---
+  MM_FILESETTINGS_MAXFILESIZE: "104857600"
+
+  MM_LOGSETTINGS_CONSOLELEVEL: INFO
+  MM_LOGSETTINGS_ENABLEFILE: "false"
+
+x-mm-service: &mm-service
+  image: mattermost/mattermost-team-edition:${MM_IMAGE_TAG:-11.10}
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 200
+  tmpfs: ["/tmp"]
+
+# PostgreSQL 18+ 공식 이미지는 데이터 디렉토리 규약이 바뀌었다.
+# 마운트 지점은 /var/lib/postgresql/data 가 아니라 /var/lib/postgresql 이어야 하며,
+# 이미지가 그 아래에 메이저 버전별 하위 디렉토리를 만든다.
+# (docker-library/postgres#1259)
+x-pg-service: &pg-service
+  image: postgres:${PG_IMAGE_TAG:-18-alpine}
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+
+services:
+  # ============================================================
+  # Mattermost A
+  # ============================================================
+  db-a:
+    <<: *pg-service
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: ${MM_DB_PASSWORD}
+      POSTGRES_DB: mattermost
+    volumes:
+      - db-a-data:/var/lib/postgresql
+
+  mm-a:
+    <<: *mm-service
+    depends_on:
+      db-a:
+        condition: service_healthy
+    environment:
+      <<: *mm-env
+      MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:${MM_DB_PASSWORD}@db-a:5432/mattermost?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: ${MM_A_SITEURL:-http://mm-a.${HOST_ADDR}.nip.io:${MM_A_PORT}}
+    ports:
+      - "${MM_A_PORT}:8065"
+    volumes:
+      - mm-a-config:/mattermost/config
+      - mm-a-data:/mattermost/data
+      - mm-a-logs:/mattermost/logs
+      - mm-a-plugins:/mattermost/plugins
+      - mm-a-client-plugins:/mattermost/client/plugins
+
+  # ============================================================
+  # Mattermost B  (MM<->MM 브릿지 상대편)
+  # ============================================================
+  db-b:
+    <<: *pg-service
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: ${MM_DB_PASSWORD}
+      POSTGRES_DB: mattermost
+    volumes:
+      - db-b-data:/var/lib/postgresql
+
+  mm-b:
+    <<: *mm-service
+    depends_on:
+      db-b:
+        condition: service_healthy
+    environment:
+      <<: *mm-env
+      MM_SQLSETTINGS_DATASOURCE: postgres://mmuser:${MM_DB_PASSWORD}@db-b:5432/mattermost?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: ${MM_B_SITEURL:-http://mm-b.${HOST_ADDR}.nip.io:${MM_B_PORT}}
+    ports:
+      - "${MM_B_PORT}:8065"
+    volumes:
+      - mm-b-config:/mattermost/config
+      - mm-b-data:/mattermost/data
+      - mm-b-logs:/mattermost/logs
+      - mm-b-plugins:/mattermost/plugins
+      - mm-b-client-plugins:/mattermost/client/plugins
+
+  # ============================================================
+  # 브릿지 자체 저장소 (MessageLink 등 - PRD 5.2)
+  # ============================================================
+  bridge-db:
+    <<: *pg-service
+    environment:
+      POSTGRES_USER: bridge
+      POSTGRES_PASSWORD: ${BRIDGE_DB_PASSWORD}
+      POSTGRES_DB: bridge
+    ports:
+      - "${BRIDGE_DB_PORT}:5432"
+    volumes:
+      - bridge-db-data:/var/lib/postgresql
+
+volumes:
+  db-a-data:
+  db-b-data:
+  bridge-db-data:
+  mm-a-config:
+  mm-a-data:
+  mm-a-logs:
+  mm-a-plugins:
+  mm-a-client-plugins:
+  mm-b-config:
+  mm-b-data:
+  mm-b-logs:
+  mm-b-plugins:
+  mm-b-client-plugins:

@@ -1,0 +1,99 @@
+[project]
+name = "chbridge"
+version = "0.1.0"
+description = "Mattermost <-> Slack 채널 브릿지"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.9.5",
+    "asyncpg>=0.30",
+    "mattermostautodriver>=11.9",
+    "prometheus-client>=0.21",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "slack-sdk>=3.43",
+    "structlog>=24.4",
+]
+
+[project.scripts]
+chbridge = "chbridge.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "types-pyyaml",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chbridge"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",      # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "N",           # pep8-naming
+    "UP",          # pyupgrade
+    "B",           # bugbear
+    "A",           # builtins shadowing
+    "C4",          # comprehensions
+    "DTZ",         # naive datetime 금지 - 타임스탬프를 다루므로 중요
+    "T20",         # print 금지 (structlog 사용 강제)
+    "SIM",         # simplify
+    "ARG",         # 미사용 인자
+    "PTH",         # pathlib
+    "RUF",
+    "ASYNC",       # 비동기 안티패턴 - 이 프로젝트에 특히 중요
+]
+ignore = [
+    "E501",        # line-length는 formatter가 처리
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 어댑터는 공통 ABC(adapters/base.py)를 구현한다. 플랫폼마다 필요한 파라미터가
+# 달라서 일부는 쓰이지 않는다 (예: Mattermost 는 편집·삭제에 channel_id 불필요).
+# 시그니처를 플랫폼별로 바꾸면 계약이 깨지므로 미사용을 허용한다.
+"src/chbridge/adapters/*" = ["ARG002"]
+# 스파이크는 검증용 일회성 코드다. print 사용을 허용한다.
+# ASYNC109: 폴링 헬퍼의 timeout 인자는 취소 범위가 아니라 데드라인이므로 무해하다.
+"spikes/*" = ["T20", "ARG", "ASYNC109"]
+# 테스트 이름은 한글로 쓴다. 명세처럼 읽혀서 실패 메시지만 봐도 무엇이
+# 깨졌는지 알 수 있다. 한글에는 대소문자가 없어 N802 가 오탐한다.
+"tests/*" = ["ARG", "N802"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+warn_no_return = true
+show_error_codes = true
+disallow_any_explicit = false
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+# 서드파티 스텁 부재 - 어댑터 경계 안에서만 쓴다
+module = ["mattermostautodriver.*", "asyncpg.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: 실제 Mattermost/Slack 인스턴스를 필요로 하는 테스트",
+]

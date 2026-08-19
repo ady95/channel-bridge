@@ -1,0 +1,49 @@
+{
+  "display_information": {
+    "name": "Channel Bridge (Dev)",
+    "description": "Mattermost와 Slack 채널 간 대화를 양방향으로 공유합니다.",
+    "long_description": "연결된 Mattermost 채널과 Slack 채널 사이에서 메시지, 쓰레드 답글, 이모지 리액션, 첨부 파일을 양방향으로 전달합니다. 원 작성자의 표시 이름과 프로필 이미지를 그대로 반영하며, 편집과 삭제도 반대편에 반영됩니다. 개발 및 테스트 전용 앱입니다.",
+    "background_color": "#2d3e50"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Channel Bridge",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "groups:read",
+        "chat:write",
+        "chat:write.customize",
+        "files:read",
+        "files:write",
+        "reactions:read",
+        "reactions:write",
+        "users:read",
+        "emoji:read",
+        "team:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "message.channels",
+        "message.groups",
+        "reaction_added",
+        "reaction_removed"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

@@ -1,0 +1,46 @@
+(chbridge) (base) ➜  channel-bridge git:(master) ✗ uv run python -m chbridge status
+2026-08-18T01:42:30.833503Z [info     ] app.config_loaded              bridges=['mm-demo', 'slack-demo'] workspaces=['mm-a', 'mm-b', 'slack-dev']
+2026-08-18T01:42:30.892859Z [info     ] db.connected                   max_size=10 min_size=2
+2026-08-18T01:42:30.896760Z [info     ] migrations.up_to_date          count=1
+2026-08-18T01:42:30.899492Z [info     ] mm.opened                      bot_user_id=qh77ghcdcbbudb4mjqjrjqdy5c bot_username=bridgebot workspace=mm-a
+2026-08-18T01:42:30.902005Z [info     ] mm.opened                      bot_user_id=rmshu3j753gxj8a55ogn3w58pe bot_username=bridgebot workspace=mm-b
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/nextlab-3050/dev/channel-bridge/src/chbridge/__main__.py", line 6, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/home/nextlab-3050/dev/channel-bridge/src/chbridge/cli.py", line 138, in main
+    return asyncio.run(_cmd_status())
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/home/nextlab-3050/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/lib/python3.13/asyncio/runners.py", line 196, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "/home/nextlab-3050/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/lib/python3.13/asyncio/runners.py", line 119, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/home/nextlab-3050/.local/share/uv/python/cpython-3.13.14-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/home/nextlab-3050/dev/channel-bridge/src/chbridge/cli.py", line 42, in _cmd_status
+    app = await build()
+          ^^^^^^^^^^^^^
+  File "/home/nextlab-3050/dev/channel-bridge/src/chbridge/app.py", line 86, in build
+    adapter = _make_adapter(workspace_id, config)
+  File "/home/nextlab-3050/dev/channel-bridge/src/chbridge/app.py", line 61, in _make_adapter
+    app_token = ws.app_token()
+  File "/home/nextlab-3050/dev/channel-bridge/src/chbridge/config.py", line 104, in app_token
+    raise ConfigError(
+        f"워크스페이스 {self.id!r}: 환경변수 {self.app_token_env} 가 비어 있음"
+    )
+chbridge.config.ConfigError: 워크스페이스 'slack-dev': 환경변수 SLACK_APP_TOKEN 가 비어 있음
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x711fb4aa1e50>
+Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x711fb4aa4980>
+Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x711fb4ad9a20>, 9920.334509765)])']
+connector: <aiohttp.connector.TCPConnector object at 0x711fb4aa16d0>
+Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x711fb4ad9be0>, 9920.331933211)])']
+connector: <aiohttp.connector.TCPConnector object at 0x711fb4aa4ec0>

@@ -1,0 +1,135 @@
+# ==============================================================================
+# Channel Bridge - Slack 앱 매니페스트
+#
+# 사용법: https://api.slack.com/apps → Create New App → From an app manifest
+#         → 워크스페이스 선택 → 이 YAML 붙여넣기 → Create
+#
+# 주의: 매니페스트는 App-Level Token(xapp-...)을 생성하지 못한다.
+#       앱 생성 후 Basic Information → App-Level Tokens 에서 직접 발급해야 한다.
+#       (자세한 절차는 아래 "생성 후 절차" 주석 참조)
+#
+# 관련 문서: PRD.txt 4.3 / 실행계획서.md Phase 0 (T-0.4, T-0.5)
+# ==============================================================================
+
+display_information:
+  name: Channel Bridge (Dev)
+  description: Mattermost와 Slack 채널 간 대화를 양방향으로 공유합니다.
+  long_description: >-
+    연결된 Mattermost 채널과 Slack 채널 사이에서 메시지, 쓰레드 답글, 이모지
+    리액션, 첨부 파일을 양방향으로 전달합니다. 원 작성자의 표시 이름과 프로필
+    이미지를 그대로 반영하며, 편집과 삭제도 반대편에 반영됩니다.
+    개발 및 테스트 전용 앱입니다.
+  background_color: "#2d3e50"
+
+features:
+  bot_user:
+    display_name: Channel Bridge
+    # 브릿지는 상시 연결이므로 항상 온라인으로 표시한다.
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      # --- 공개 채널 읽기 (PRD 7 범위: 공개 채널) ---
+      - channels:history
+      - channels:read
+
+      # --- 비공개 채널 읽기 (봇이 초대된 경우) ---
+      - groups:history
+      - groups:read
+
+      # --- 게시 ---
+      - chat:write
+      # ★ 원 작성자 이름/아이콘 오버라이드에 필수 (PRD 5.3)
+      #   이 스코프가 없으면 username/icon_url 지정이 무시된다.
+      - chat:write.customize
+
+      # --- 파일 (PRD 5.8) ---
+      # files:read  = url_private 다운로드
+      # files:write = getUploadURLExternal + completeUploadExternal
+      - files:read
+      - files:write
+
+      # --- 리액션 (PRD 5.5) ---
+      - reactions:read
+      - reactions:write
+
+      # --- 사용자 정보: 표시 이름·아바타 조회 (PRD 5.3) ---
+      - users:read
+
+      # --- 이모지 존재 확인 (PRD 5.6 매핑 실패 시 폴백 판정) ---
+      - emoji:read
+
+      # --- 워크스페이스 이름 조회: 출처 별칭 자동 확인 (FR-2.3) ---
+      - team:read
+
+      # ------------------------------------------------------------------
+      # 아래는 지금 넣지 않는다. 최소 권한 원칙(NFR-3).
+      # 스코프 추가는 앱 재설치를 요구하므로, 실제로 필요해질 때 추가한다.
+      #
+      #   users:read.email   FR-7.2 이메일 기준 멘션 매핑 (Phase 4)
+      #   im:history         DM 브릿지 — PRD 7에서 명시적 범위 외
+      #   mpim:history       그룹 DM — 동일
+      # ------------------------------------------------------------------
+
+settings:
+  event_subscriptions:
+    # Socket Mode 를 쓰므로 request_url 을 지정하지 않는다.
+    # (인바운드 포트를 열지 않는다 - PRD 4.3)
+    bot_events:
+      # 공개 채널 메시지. 편집은 subtype=message_changed,
+      # 삭제는 subtype=message_deleted 로 같은 이벤트에 실려 온다.
+      - message.channels
+      # 비공개 채널 메시지
+      - message.groups
+      # 리액션 (PRD 5.5)
+      - reaction_added
+      - reaction_removed
+
+  interactivity:
+    # 버튼·모달 등 앱 상호작용은 범위 외 (PRD 7)
+    is_enabled: false
+
+  # 사내 단일 워크스페이스 설치. 조직 전체 배포 불필요 (PRD 4.6)
+  org_deploy_enabled: false
+
+  # 아웃바운드 WebSocket 연결만 사용 (PRD 4.3)
+  socket_mode_enabled: true
+
+  # 토큰 자동 회전은 Socket Mode 앱에 불필요하며 운영 복잡도만 늘린다.
+  token_rotation_enabled: false
+
+# ==============================================================================
+# 생성 후 절차
+#
+# 1) App-Level Token 발급  ← 매니페스트로는 불가, 반드시 수동
+#    Basic Information → App-Level Tokens → Generate Token and Scopes
+#      Token Name : socket-mode
+#      Scope      : connections:write
+#    → xapp-... 토큰 획득
+#
+# 2) 워크스페이스 설치
+#    Install App → Install to Workspace → 허용
+#    → Bot User OAuth Token (xoxb-...) 획득
+#
+# 3) Socket Mode 확인
+#    Socket Mode 메뉴에서 Enable Socket Mode 가 켜져 있는지 확인
+#    (매니페스트로 켜지지만 확인 권장)
+#
+# 4) 테스트 채널 준비
+#    Slack 에서 채널 생성 (예: #bridge-test)
+#    채널에서  /invite @Channel Bridge
+#    채널 ID 확인: 채널명 우클릭 → 링크 복사 → .../archives/C0XXXXXXX 의 C0... 부분
+#
+# 5) 서버에 토큰 기록 (채팅에 붙여넣지 말 것)
+#    ssh Ubuntu-3050
+#    cd /home/nextlab-3050/dev/channel-bridge/dev
+#    cat >> .tokens.env <<'EOF'
+#    SLACK_APP_TOKEN=xapp-...
+#    SLACK_BOT_TOKEN=xoxb-...
+#    SLACK_TEST_CHANNEL=C0XXXXXXX
+#    EOF
+#    chmod 600 .tokens.env
+#
+#    .tokens.env 는 .gitignore 처리되어 있다.
+# ==============================================================================
