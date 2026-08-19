@@ -32,7 +32,7 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
-from chbridge.adapters.base import Adapter, AdapterError, EventSink
+from chbridge.adapters.base import Adapter, AdapterError, EventSink, FileMode
 from chbridge.adapters.names import NameCache
 from chbridge.cir import (
     Author,
@@ -424,13 +424,13 @@ class SlackAdapter(Adapter):
         return _MAX_FILE_SIZE
 
     def supports_upload(self) -> bool:
-        # ★ 미구현. Slack 은 chat.postMessage 에 파일 id 를 붙일 수 없고,
-        #   files_upload_v2 가 파일을 **별도 메시지로** 게시한다. 그래서 본문과
-        #   첨부가 한 메시지로 합쳐지지 않고, username 오버라이드(FR-2.3)도
-        #   파일 메시지에는 적용되지 않는다. 어느 쪽을 포기할지 정하지 않은 채
-        #   구현하면 되돌리기 어려우므로 보류한다.
-        #   그동안 MM->Slack 첨부는 조용히 사라지지 않고 안내 문구가 된다.
-        return False
+        return True
+
+    def file_mode(self) -> FileMode:
+        # Slack 은 chat.postMessage 에 파일 id 를 실을 수 없다. 먼저 본문을
+        # 게시해 ts 를 얻은 뒤, 그 쓰레드에 첨부를 매단다. 그래야 본문이
+        # username 오버라이드(FR-2.3)를 유지한 채 한 덩어리로 보인다.
+        return FileMode.POST_ATTACH
 
     @contextlib.asynccontextmanager
     async def open_file(self, file: FileAttachment) -> AsyncIterator[AsyncIterator[bytes]]:
@@ -457,12 +457,60 @@ class SlackAdapter(Adapter):
             await session.close()
 
     async def upload_file(
-        self, channel_id: str, file: FileAttachment, chunks: AsyncIterator[bytes]
+        self,
+        channel_id: str,
+        file: FileAttachment,
+        chunks: AsyncIterator[bytes],
+        *,
+        message_id: str | None = None,
     ) -> str:
-        raise AdapterError(
-            "Slack 파일 업로드는 아직 구현되지 않았습니다 (supports_upload() 주석 참고)",
-            retryable=False,
-        )
+        """3단계 외부 업로드. (files.getUploadURLExternal -> PUT -> complete)
+
+        slack_sdk 의 files_upload_v2 를 쓰지 않는 이유: 그 헬퍼는 파일을
+        통째로 메모리에 올린다. 수백 MB 첨부에서 그대로 터지므로 세 단계를
+        직접 호출하고 2단계 본문만 스트리밍한다.
+
+        1단계가 length 를 요구하므로 **크기를 모르면 이 경로를 쓸 수 없다.**
+        원본 메타데이터에 크기가 없으면 버퍼링 대신 실패로 처리한다 —
+        모르는 크기를 메모리에 담는 것이 더 위험하다.
+        """
+        if file.size <= 0:
+            raise AdapterError(
+                f"Slack 업로드에는 파일 크기가 필요합니다 (원본이 알려주지 않음): {file.name}",
+                retryable=False,
+            )
+
+        # 1) 업로드 URL 발급
+        info = await self._call("files_getUploadURLExternal", filename=file.name, length=file.size)
+        upload_url = str(info["upload_url"])
+        file_id = str(info["file_id"])
+
+        # 2) 바이트 전송. 이 URL 은 토큰이 아니라 URL 자체가 자격증명이다.
+        session = aiohttp.ClientSession(timeout=_FILE_TIMEOUT)
+        try:
+            async with session.post(upload_url, data=chunks) as resp:
+                if resp.status >= 400:
+                    body = (await resp.text())[:200]
+                    raise AdapterError(
+                        f"Slack 업로드 전송 실패 {file.name}: HTTP {resp.status}: {body}",
+                        retryable=resp.status >= 500 or resp.status in (408, 429),
+                    )
+        except aiohttp.ClientError as exc:
+            raise AdapterError(
+                f"Slack 업로드 통신 실패 {file.name}: {exc}", retryable=True
+            ) from exc
+        finally:
+            await session.close()
+
+        # 3) 채널에 공유. thread_ts 를 주면 본문 메시지의 쓰레드에 매달린다.
+        payload: dict[str, Any] = {
+            "files": [{"id": file_id, "title": file.name}],
+            "channel_id": channel_id,
+        }
+        if message_id:
+            payload["thread_ts"] = message_id
+        await self._call("files_completeUploadExternal", **payload)
+        return file_id
 
     # ------------------------------------------------------------ 백필
 

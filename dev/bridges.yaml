@@ -46,21 +46,23 @@ bridges:
 
   # Phase 2 목표: MM↔Slack 양방향
   # mm-a 의 bridge-2 를 쓴다. 한 채널은 하나의 브릿지에만 속할 수 있다(PRD 5.1).
-  #
-  # SLACK_BOT_TOKEN / SLACK_APP_TOKEN 이 준비되면 주석을 해제한다.
-  # 지금 켜면 기동 시 ConfigError 로 멈춘다.
-  # - id: slack-demo
-  #   name: MM-A/bridge-2 <-> Slack/#test
-  #   endpoints:
-  #     - workspace: mm-a
-  #       team: bridge
-  #       channel: bridge-2
-  #     - workspace: slack-dev
-  #       channel: test
-  #   options:
-  #     relay_edits: true
-  #     relay_deletes: true
-  #     relay_files: false
-  #     relay_reactions: false
-  #     relay_bot_messages: false
-  #     allow_channel_mentions: false
+  - id: slack-demo
+    name: MM-A/bridge-2 <-> Slack/#test
+    endpoints:
+      - workspace: mm-a
+        team: bridge
+        channel: bridge-2
+      - workspace: slack-dev
+        # 이름 대신 id 를 쓴다. conversations.list 순회를 건너뛰고,
+        # 채널명이 바뀌어도 브릿지가 끊기지 않는다. (#test)
+        channel_id: C0BNRNCSUUA
+    options:
+      relay_edits: true
+      relay_deletes: true
+      # Slack 으로 보내는 첨부는 아직 업로드 미구현이라 안내 문구가 된다.
+      # Slack -> MM 방향은 실제 전달된다.
+      relay_files: true
+      # Phase 3 에서 활성화
+      relay_reactions: false
+      relay_bot_messages: false
+      allow_channel_mentions: false

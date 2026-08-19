@@ -85,6 +85,9 @@ settings:
       # 리액션 (PRD 5.5)
       - reaction_added
       - reaction_removed
+      # 프로필 변경. 표시 이름 캐시를 즉시 갱신하는 데 쓴다.
+      # 이게 없으면 이름을 바꿔도 캐시 TTL(5분)이 지나야 반영된다.
+      - user_change
 
   interactivity:
     # 버튼·모달 등 앱 상호작용은 범위 외 (PRD 7)

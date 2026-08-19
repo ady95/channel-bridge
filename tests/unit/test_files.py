@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from chbridge.adapters.base import Adapter, AdapterError
+from chbridge.adapters.base import Adapter, AdapterError, FileMode
 from chbridge.adapters.mattermost import _parse_files
 from chbridge.cir import FileAttachment, Platform
 from chbridge.relay import Relay
@@ -101,12 +101,26 @@ class FakeAdapter(Adapter):
 
     platform = Platform.MATTERMOST
 
-    def __init__(self, *, limit: int = 0, uploads_ok: bool = True, supports: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        limit: int = 0,
+        uploads_ok: bool = True,
+        supports: bool = True,
+        mode: FileMode = FileMode.PRE_UPLOAD,
+    ) -> None:
         self.workspace_id = "ws"
         self._limit = limit
         self._uploads_ok = uploads_ok
         self._supports = supports
+        self._mode = mode
         self.received: dict[str, bytes] = {}
+        self.attached_to: dict[str, str | None] = {}
+        self.sent: list[object] = []
+        self.edited: list[object] = []
+
+    def file_mode(self) -> FileMode:
+        return self._mode
 
     def max_file_size(self) -> int:
         return self._limit
@@ -123,11 +137,17 @@ class FakeAdapter(Adapter):
         yield chunks()
 
     async def upload_file(
-        self, channel_id: str, file: FileAttachment, chunks: AsyncIterator[bytes]
+        self,
+        channel_id: str,
+        file: FileAttachment,
+        chunks: AsyncIterator[bytes],
+        *,
+        message_id: str | None = None,
     ) -> str:
         if not self._uploads_ok:
             raise AdapterError("업로드 실패", retryable=False)
         self.received[file.name] = b"".join([c async for c in chunks])
+        self.attached_to[file.name] = message_id
         return f"uploaded-{file.name}"
 
     # 이 테스트에서 쓰지 않는 계약
@@ -141,9 +161,12 @@ class FakeAdapter(Adapter):
         return "c"
 
     async def send(self, channel_id: str, message: object) -> str:  # type: ignore[override]
+        self.sent.append(message)
         return "m"
 
-    async def edit(self, channel_id: str, message_id: str, message: object) -> None: ...  # type: ignore[override]
+    async def edit(self, channel_id: str, message_id: str, message: object) -> None:  # type: ignore[override]
+        self.edited.append(message)
+
     async def delete(self, channel_id: str, message_id: str) -> None: ...
     async def backfill(self, channel_id: str, since: str | None) -> list[object]:  # type: ignore[override]
         return []
@@ -262,3 +285,83 @@ async def test_일부만_실패해도_나머지는_전달된다() -> None:
     assert ids == ("uploaded-ok.txt",)
     assert "big.zip" in notice
     assert "ok.txt" not in notice
+
+
+# --------------------------------------------- 게시 순서 (PRE_UPLOAD / POST_ATTACH)
+
+
+async def send_via(relay: Relay, files: tuple[FileAttachment, ...], text: str = "본문") -> str:
+    from chbridge.cir import Event, EventKind, MessageRef
+
+    event = Event(
+        kind=EventKind.MESSAGE_CREATED,
+        source=MessageRef(
+            platform=Platform.MATTERMOST, workspace_id="src", channel_id="c", message_id="m"
+        ),
+        event_key="k",
+        text=text,
+        files=files,
+    )
+    return await relay._send_with_files(
+        event, endpoint("src"), endpoint("dst"), None, relay_files=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_PRE_UPLOAD_는_게시에_file_ids_를_싣는다() -> None:
+    # ★ 이 검증이 없으면 파일이 올라가고도 게시물에 붙지 않는다.
+    #   실제로 리팩터링 중 이 연결이 끊겨 ruff 가 잡아냈다.
+    dst = FakeAdapter(mode=FileMode.PRE_UPLOAD)
+    relay = relay_with(FakeAdapter(), dst)
+    await send_via(relay, (FileAttachment(source_file_id="f1", name="a.txt", size=11),))
+
+    assert len(dst.sent) == 1
+    assert dst.sent[0].file_ids == ("uploaded-a.txt",)  # type: ignore[attr-defined]
+    assert dst.edited == []  # 편집 없이 한 번에 끝난다
+
+
+@pytest.mark.asyncio
+async def test_POST_ATTACH_는_게시_후_message_id_로_첨부한다() -> None:
+    dst = FakeAdapter(mode=FileMode.POST_ATTACH)
+    relay = relay_with(FakeAdapter(), dst)
+    new_id = await send_via(relay, (FileAttachment(source_file_id="f1", name="a.txt", size=11),))
+
+    assert new_id == "m"
+    # 본문에는 file_ids 를 싣지 않는다 (Slack 은 실을 수 없다).
+    assert dst.sent[0].file_ids == ()  # type: ignore[attr-defined]
+    # 대신 방금 게시한 메시지 id 를 받아 매단다.
+    assert dst.attached_to["a.txt"] == "m"
+    assert dst.edited == []
+
+
+@pytest.mark.asyncio
+async def test_POST_ATTACH_사전_검사_실패는_본문에_미리_실린다() -> None:
+    # 편집 왕복 없이 한 번에 끝나야 한다.
+    dst = FakeAdapter(mode=FileMode.POST_ATTACH, limit=1024)
+    relay = relay_with(FakeAdapter(), dst)
+    await send_via(relay, (FileAttachment(source_file_id="f1", name="big.zip", size=99999),))
+
+    assert "big.zip" in dst.sent[0].text  # type: ignore[attr-defined]
+    assert dst.edited == []
+
+
+@pytest.mark.asyncio
+async def test_POST_ATTACH_전송_실패는_게시_후_편집으로_알린다() -> None:
+    # 전송 실패는 게시 뒤에야 알 수 있다. 조용히 넘어가지 않는다.
+    dst = FakeAdapter(mode=FileMode.POST_ATTACH, uploads_ok=False)
+    relay = relay_with(FakeAdapter(), dst)
+    await send_via(relay, (FileAttachment(source_file_id="f1", name="a.txt", size=11),))
+
+    assert "a.txt" not in dst.sent[0].text  # type: ignore[attr-defined]
+    assert len(dst.edited) == 1
+    assert "a.txt" in dst.edited[0].text and "전송 실패" in dst.edited[0].text  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_POST_ATTACH_는_같은_파일을_두_번_안내하지_않는다() -> None:
+    dst = FakeAdapter(mode=FileMode.POST_ATTACH, limit=1024)
+    relay = relay_with(FakeAdapter(), dst)
+    await send_via(relay, (FileAttachment(source_file_id="f1", name="big.zip", size=99999),))
+
+    assert dst.sent[0].text.count("big.zip") == 1  # type: ignore[attr-defined]
+    assert dst.edited == []

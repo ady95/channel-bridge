@@ -9,11 +9,12 @@ MessageLink 로 조회해 대상 플랫폼의 부모 id 로 바꿔 넣는다.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 import structlog
 
-from chbridge.adapters.base import Adapter, AdapterError
+from chbridge.adapters.base import Adapter, AdapterError, FileMode
 from chbridge.cir import Event, EventKind, FileAttachment, OutboundMessage
 from chbridge.loopguard import LoopGuard
 from chbridge.router import Endpoint, Router
@@ -99,18 +100,9 @@ class Relay:
         bridge = self._router.bridge_of(source.bridge_id)
         for target in targets:
             parent_id = await self._resolve_parent(event, source, target)
-            adapter = self._adapters[target.workspace_id]
-            file_ids, notice = await self._transfer_files(
-                event, source, target, relay_files=bridge.options.relay_files
+            new_id = await self._send_with_files(
+                event, source, target, parent_id, relay_files=bridge.options.relay_files
             )
-            outbound = OutboundMessage(
-                text=append_notice(event.text, notice),
-                author=event.author,
-                parent_message_id=parent_id,
-                file_ids=file_ids,
-                source_alias=source.alias,
-            )
-            new_id = await adapter.send(target.channel_id, outbound)
 
             # ★ 게시 직후 즉시 기록해야 한다. 자기 발신 이벤트가 곧 도착하며,
             #   방어 ②가 성립하려면 그 전에 Replica 로 등록돼 있어야 한다.
@@ -131,8 +123,85 @@ class Relay:
 
     # ------------------------------------------------------------ 첨부 전달
 
+    async def _send_with_files(
+        self,
+        event: Event,
+        source: Endpoint,
+        target: Endpoint,
+        parent_id: str | None,
+        *,
+        relay_files: bool,
+    ) -> str:
+        """첨부 순서를 대상 플랫폼에 맞춰 게시한다.
+
+        Mattermost 는 게시 요청에 file_ids 를 실어야 하고(PRE_UPLOAD),
+        Slack 은 게시 후 ts 를 알아야 첨부를 매달 수 있다(POST_ATTACH).
+        정반대 순서를 여기 한 곳에서만 분기한다. 어느 쪽이든 **본문은 한 번만
+        게시되고**, 전달 못 한 첨부는 안내 문구로 남는다.
+        """
+        dst = self._adapters[target.workspace_id]
+
+        def outbound(text: str, file_ids: tuple[str, ...] = ()) -> OutboundMessage:
+            return OutboundMessage(
+                text=text,
+                author=event.author,
+                parent_message_id=parent_id,
+                file_ids=file_ids,
+                source_alias=source.alias,
+            )
+
+        if dst.file_mode() is FileMode.PRE_UPLOAD:
+            file_ids, notice = await self._transfer_files(
+                event, source, target, relay_files=relay_files
+            )
+            return await dst.send(
+                target.channel_id, outbound(append_notice(event.text, notice), file_ids)
+            )
+
+        # POST_ATTACH: 올려보기 전에 알 수 있는 실패는 본문에 미리 싣는다.
+        # 그래야 대부분의 경우 편집 없이 한 번에 끝난다.
+        known = self._precheck_all(event, dst, relay_files=relay_files)
+        new_id = await dst.send(
+            target.channel_id, outbound(append_notice(event.text, self._notice(known, dst)))
+        )
+
+        after = await self._transfer_files(
+            event, source, target, relay_files=relay_files, message_id=new_id, skip_precheck=known
+        )
+        if after[1]:
+            # 전송 자체가 실패한 건 게시 뒤에야 안다. 본문을 고쳐 알린다 —
+            # 별도 메시지를 덧붙이면 원문과 분리되어 눈에 덜 띈다.
+            merged = self._notice(known, dst) + ("\n" if known else "") + after[1]
+            with contextlib.suppress(AdapterError):
+                await dst.edit(
+                    target.channel_id, new_id, outbound(append_notice(event.text, merged))
+                )
+        return new_id
+
+    def _precheck_all(
+        self, event: Event, dst: Adapter, *, relay_files: bool
+    ) -> list[tuple[FileAttachment, SkipReason]]:
+        limit = dst.max_file_size()
+        out = []
+        for file in event.files:
+            reason = self._precheck(file, relay_files=relay_files, dst=dst, limit=limit)
+            if reason is not None:
+                out.append((file, reason))
+        return out
+
+    @staticmethod
+    def _notice(skipped: list[tuple[FileAttachment, SkipReason]], dst: Adapter) -> str:
+        return skip_notice(skipped, limit=dst.max_file_size())
+
     async def _transfer_files(
-        self, event: Event, source: Endpoint, target: Endpoint, *, relay_files: bool
+        self,
+        event: Event,
+        source: Endpoint,
+        target: Endpoint,
+        *,
+        relay_files: bool,
+        message_id: str | None = None,
+        skip_precheck: list[tuple[FileAttachment, SkipReason]] | None = None,
     ) -> tuple[tuple[str, ...], str]:
         """첨부를 원본에서 대상으로 흘려보낸다. (업로드된 id, 안내 문구) 반환.
 
@@ -152,15 +221,24 @@ class Relay:
 
         uploaded: list[str] = []
         skipped: list[tuple[FileAttachment, SkipReason]] = []
+        # POST_ATTACH 경로는 사전 검사를 이미 마쳤다. 같은 파일을 두 번
+        # 안내하지 않도록 그 목록은 건너뛴다.
+        already = {f.source_file_id for f, _ in (skip_precheck or ())}
 
         for file in event.files:
+            if file.source_file_id in already:
+                continue
             reason = self._precheck(file, relay_files=relay_files, dst=dst, limit=limit)
             if reason is not None:
                 skipped.append((file, reason))
                 continue
             try:
                 async with src.open_file(file) as chunks:
-                    uploaded.append(await dst.upload_file(target.channel_id, file, chunks))
+                    uploaded.append(
+                        await dst.upload_file(
+                            target.channel_id, file, chunks, message_id=message_id
+                        )
+                    )
             except AdapterError as exc:
                 log.warning(
                     "relay.file_failed",

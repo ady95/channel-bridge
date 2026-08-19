@@ -36,7 +36,8 @@
         "message.channels",
         "message.groups",
         "reaction_added",
-        "reaction_removed"
+        "reaction_removed",
+        "user_change"
       ]
     },
     "interactivity": {

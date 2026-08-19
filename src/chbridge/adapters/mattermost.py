@@ -204,8 +204,14 @@ class MattermostAdapter(Adapter):
             ) from exc
 
     async def upload_file(
-        self, channel_id: str, file: FileAttachment, chunks: AsyncIterator[bytes]
+        self,
+        channel_id: str,
+        file: FileAttachment,
+        chunks: AsyncIterator[bytes],
+        *,
+        message_id: str | None = None,
     ) -> str:
+        # message_id 는 쓰지 않는다. MM 은 PRE_UPLOAD 라 게시 전에 불린다.
         # multipart 대신 단순 바이너리 업로드를 쓴다. aiohttp 의 FormData 는
         # async iterator 를 받아주지만 길이를 모르면 청크 전송이 되는데, MM 의
         # multipart 파서가 그 경로에서 까다롭다. 이 엔드포인트는 원시 바디를

@@ -9,8 +9,23 @@ from __future__ import annotations
 import abc
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from enum import StrEnum
 
 from chbridge.cir import Event, FileAttachment, OutboundMessage, Platform
+
+
+class FileMode(StrEnum):
+    """첨부 처리 순서. 플랫폼이 강제한다.
+
+    Mattermost 는 `POST /posts` 에 file_ids 를 실어야 하므로 **게시 전에**
+    올려야 하고, Slack 은 chat.postMessage 에 파일 id 를 붙일 수 없어
+    **게시 후에** files.completeUploadExternal 로 매달아야 한다.
+    정반대라서 한쪽 순서로 통일할 수 없다.
+    """
+
+    PRE_UPLOAD = "pre_upload"
+    POST_ATTACH = "post_attach"
+
 
 # 어댑터가 수신 이벤트를 밀어넣는 곳. 파이프라인 진입점.
 EventSink = Callable[[Event], Awaitable[None]]
@@ -84,6 +99,14 @@ class Adapter(abc.ABC):
         """
         return False
 
+    def file_mode(self) -> FileMode:
+        """첨부를 게시 **전에** 올리는가, **후에** 붙이는가.
+
+        플랫폼이 강제하는 순서라 어댑터가 선언한다. Relay 는 이 값만 보고
+        호출 순서를 정하며, 플랫폼 이름을 알 필요가 없다.
+        """
+        return FileMode.PRE_UPLOAD
+
     @abc.abstractmethod
     def open_file(self, file: FileAttachment) -> AbstractAsyncContextManager[AsyncIterator[bytes]]:
         """원본에서 파일 바이트를 스트리밍한다.
@@ -94,12 +117,18 @@ class Adapter(abc.ABC):
 
     @abc.abstractmethod
     async def upload_file(
-        self, channel_id: str, file: FileAttachment, chunks: AsyncIterator[bytes]
+        self,
+        channel_id: str,
+        file: FileAttachment,
+        chunks: AsyncIterator[bytes],
+        *,
+        message_id: str | None = None,
     ) -> str:
         """대상 채널에 업로드하고 **대상 플랫폼의** file id 를 반환한다.
 
-        업로드와 게시가 분리된 이유: 게시 시점에 file id 목록이 필요하므로
-        (Mattermost `POST /posts` 의 file_ids) 먼저 올려야 한다.
+        message_id 는 POST_ATTACH 어댑터에만 전달된다. 방금 게시한 메시지에
+        첨부를 매다는 데 쓴다 (Slack 의 thread_ts). PRE_UPLOAD 어댑터는
+        게시 전에 호출되므로 이 값을 받지 못하고, 받아도 쓰지 않는다.
         """
 
     @abc.abstractmethod
